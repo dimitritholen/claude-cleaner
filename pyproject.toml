@@ -1,0 +1,28 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "claude-cleaner"
+dynamic = ["version"]
+description = "Reset Claude Code to factory defaults, keeping your login and the MCP servers, plugins and skills you pick."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["textual>=0.80"]
+
+[project.optional-dependencies]
+test = ["pytest>=8", "pytest-asyncio>=0.23"]
+
+[project.scripts]
+claude-cleaner = "claude_cleaner.cli:main"
+
+[tool.hatch.version]
+path = "src/claude_cleaner/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/claude_cleaner"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
