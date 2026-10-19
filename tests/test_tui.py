@@ -17,6 +17,7 @@ async def test_pick_review_and_reset(home):
         assert (home.config_dir / "CLAUDE.md").exists()  # nothing happens before confirming
 
         await pilot.click("#reset")
+        await app.workers.wait_for_complete()
         await pilot.pause()
         assert isinstance(app.screen, DoneScreen)
         assert app.screen.archive.exists()

@@ -43,3 +43,10 @@ def test_unknown_keep_is_an_error(home, capsys):
 
 def test_restore_without_backups(home, capsys):
     assert main(["restore", "--yes"], paths=home) == 2
+
+
+def test_reset_prints_progress_on_a_terminal(home, capsys, monkeypatch):
+    monkeypatch.setattr("sys.stderr.isatty", lambda: True)
+    assert main(["reset", "--yes"], paths=home) == 0
+    err = capsys.readouterr().err
+    assert "Backing up" in err and "Deleting" in err and "100%" in err

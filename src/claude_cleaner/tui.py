@@ -3,25 +3,28 @@
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
 
 from rich.text import Text
-from textual import on
+from textual import on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, VerticalScroll
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import Screen
 from textual.widgets import (
     Button,
     Footer,
     Header,
+    ProgressBar,
     SelectionList,
     Static,
     TabbedContent,
     TabPane,
 )
+from textual.worker import Worker, WorkerState
 
-from .cli import display
+from .cli import display, human_bytes
 from .inventory import Inventory, logged_in, scan
 from .paths import ClaudePaths
 from .procs import claude_running
@@ -56,13 +59,17 @@ class PickScreen(Screen):
     def compose(self) -> ComposeResult:
         inv = self.inventory
         yield Header()
-        login = "found" if logged_in(inv.paths, inv.global_config) else (
-            "kept in the macOS Keychain" if sys.platform == "darwin" else "not found")
+        if logged_in(inv.paths, inv.global_config):
+            login = ("Your login stays.", "green")
+        elif sys.platform == "darwin":
+            login = ("Your login stays (it is in the macOS Keychain).", "green")
+        else:
+            login = ("No login found: you will have to sign in again.", "bold yellow")
         yield Static(
             Text.assemble(
                 "Tick what to keep. Everything else in ",
                 (display(inv.paths.config_dir, inv.paths), "bold"),
-                " is deleted (after a backup). Your login is ", (login, "bold"), " and is kept.",
+                " is deleted, after a backup. ", login,
             ),
             id="intro",
         )
@@ -89,6 +96,7 @@ class PickScreen(Screen):
         with Horizontal(id="actions"):
             yield Button("Review", id="review", variant="primary")
             yield Button("Quit", id="quit")
+            yield Static(id="keeping")
         yield Footer()
 
     def _list(self, name: str, options: list[tuple[Text, str]], empty: str):
@@ -104,6 +112,17 @@ class PickScreen(Screen):
 
     def on_mount(self) -> None:
         self._focus_active_list()
+        self._count_kept()
+
+    @on(SelectionList.SelectedChanged)
+    def _count_kept(self) -> None:
+        sel = self.selection()
+        self.query_one("#keeping", Static).update(Text.assemble(
+            ("Keeping  ", "dim"),
+            " · ".join([_plural(len(sel.mcp_servers), "MCP server"),
+                        _plural(len(sel.plugins), "plugin"),
+                        _plural(len(sel.skills), "skill")]),
+        ))
 
     @on(TabbedContent.TabActivated)
     def _focus_active_list(self) -> None:
@@ -186,12 +205,57 @@ class ReviewScreen(Screen):
 
     @on(Button.Pressed, "#reset")
     def _reset(self) -> None:
-        try:
-            archive = apply_reset(self.plan)
-        except Exception as exc:  # show it rather than crash with a traceback
-            self.app.push_screen(DoneScreen(None, error=str(exc)))
-            return
-        self.app.push_screen(DoneScreen(archive))
+        self.app.switch_screen(ResetScreen(self.plan))
+
+
+class ResetScreen(Screen):
+    """Runs the reset in a thread, so the screen keeps drawing, and shows how far it is."""
+
+    def __init__(self, plan: ResetPlan) -> None:
+        super().__init__()
+        self.plan = plan
+
+    def compose(self) -> ComposeResult:
+        paths = self.plan.inventory.paths
+        yield Header()
+        with Vertical(id="progress"):
+            yield Static(Text("Step 1 of 2  Backing up", style="bold"), id="step")
+            yield Static(f"Counting files in {display(paths.config_dir, paths)}...",
+                         id="detail")
+            yield ProgressBar(total=None, show_eta=False)
+            yield Static(Text("Do not close this window until the reset is done.", style="dim"))
+        yield Footer()
+
+    def on_mount(self) -> None:
+        self._run()
+
+    @work(thread=True, exit_on_error=False)
+    def _run(self) -> Path | None:
+        last = 0.0
+
+        def progress(step: str, done: int, total: int) -> None:
+            nonlocal last
+            now = time.monotonic()
+            if now - last >= 0.1 or done == total:  # redraw ten times a second at most
+                last = now
+                self.app.call_from_thread(self._show, step, done, total)
+
+        return apply_reset(self.plan, progress=progress)
+
+    def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
+        if event.state == WorkerState.SUCCESS:
+            self.app.switch_screen(DoneScreen(event.worker.result))
+        elif event.state == WorkerState.ERROR:  # show it rather than crash with a traceback
+            self.app.switch_screen(DoneScreen(None, error=str(event.worker.error)))
+
+    def _show(self, step: str, done: int, total: int) -> None:
+        if step == "backup":
+            title, detail = "Step 1 of 2  Backing up", f"{human_bytes(done)} of {human_bytes(total)}"
+        else:
+            title, detail = "Step 2 of 2  Deleting", f"{done} of {_plural(total, 'item')}"
+        self.query_one("#step", Static).update(Text(title, style="bold"))
+        self.query_one("#detail", Static).update(detail)
+        self.query_one(ProgressBar).update(total=max(total, 1), progress=done)
 
 
 class DoneScreen(Screen):
@@ -212,7 +276,8 @@ class DoneScreen(Screen):
         else:
             message = Text()
             message.append("Claude Code has been reset.\n\n", style="bold green")
-            message.append(f"Backup: {self.archive}\n")
+            message.append("Backup  ", style="dim")
+            message.append(f"{display(self.archive, self.app.paths)}\n")
             message.append("Undo with: claude-cleaner restore")
         yield Static(message, id="done")
         with Horizontal(id="actions"):
@@ -228,6 +293,12 @@ class CleanerApp(App):
     TITLE = "Claude Cleaner"
     SUB_TITLE = "Reset Claude Code, keep your login"
     CSS = """
+    SelectionList > .selection-list--button-selected { color: $success; text-style: bold; }
+    #keeping { width: 1fr; height: 3; content-align: right middle; }
+    #progress { padding: 1 2; height: 1fr; }
+    #progress Static { margin-bottom: 1; }
+    #progress ProgressBar { margin-bottom: 1; }
+    #progress Bar { width: 1fr; }
     #intro { padding: 1 2; }
     .empty { padding: 1 2; color: $text-muted; }
     SelectionList { height: 1fr; }
@@ -245,6 +316,12 @@ class CleanerApp(App):
 
     def on_mount(self) -> None:
         self.push_screen(PickScreen(scan(self.paths)))
+
+    async def action_quit(self) -> None:
+        if isinstance(self.screen, ResetScreen):
+            self.notify("Wait for the reset to finish.", severity="warning")
+            return
+        self.exit()
 
 
 def run(paths: ClaudePaths) -> int:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from pathlib import Path
 
 from . import __version__, backup
@@ -105,6 +106,41 @@ def display(path: Path, paths: ClaudePaths) -> str:
         return str(path)
 
 
+def human_bytes(n: float) -> str:
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1024
+    return ""
+
+
+def progress_printer():
+    """A progress callback that redraws one line per step on a terminal, and stays silent
+    when stderr is not one (so logs do not fill up with carriage returns)."""
+    if not sys.stderr.isatty():
+        return None
+    last = {"step": None, "time": 0.0}
+
+    def show(step: str, done: int, total: int) -> None:
+        now = time.monotonic()
+        if step == last["step"] and now - last["time"] < 0.1 and done < total:
+            return
+        if last["step"] not in (None, step):
+            print(file=sys.stderr)
+        last.update(step=step, time=now)
+        if step == "backup":
+            text = f"Backing up  {human_bytes(done)} of {human_bytes(total)}"
+        else:
+            text = f"Deleting    {done} of {total} items"
+        percent = done * 100 // max(total, 1)
+        print(f"\r{text}  {percent:3d}%\033[K", end="", file=sys.stderr, flush=True)
+        if done >= total:
+            print(file=sys.stderr)
+            last["step"] = None
+
+    return show
+
+
 def cmd_reset(paths: ClaudePaths, args: argparse.Namespace) -> int:
     inv: Inventory = scan(paths)
     selection = Selection(set(args.keep_mcp), set(args.keep_plugin), set(args.keep_skill))
@@ -125,8 +161,9 @@ def cmd_reset(paths: ClaudePaths, args: argparse.Namespace) -> int:
     if not args.yes and not confirm("\nBack up and reset now?"):
         print("Cancelled.")
         return 1
-    archive = apply_reset(plan)
-    print(f"\nDone. Backup: {archive}")
+    print()
+    archive = apply_reset(plan, progress=progress_printer())
+    print(f"Done. Backup: {archive}")
     print("Undo with: claude-cleaner restore")
     return 0
 
@@ -160,7 +197,9 @@ def cmd_restore(paths: ClaudePaths, args: argparse.Namespace) -> int:
     if not args.yes and not confirm("Restore now?"):
         print("Cancelled.")
         return 1
-    safety = backup.restore(archive, paths)
+    show = progress_printer()
+    safety = backup.restore(archive, paths,
+                            progress=(lambda done, total: show("backup", done, total)) if show else None)
     print(f"Restored. Your state from just before is in {safety}")
     return 0
 

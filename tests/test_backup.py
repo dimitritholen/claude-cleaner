@@ -51,3 +51,13 @@ def test_backup_is_private(home):
     archive = backup.create(home)
     if os.name != "nt":
         assert stat.S_IMODE(archive.stat().st_mode) == 0o600
+
+
+def test_reset_reports_progress_to_the_end(home):
+    plan = plan_reset(scan(home), Selection())
+    seen = []
+    apply_reset(plan, progress=lambda step, done, total: seen.append((step, done, total)))
+    backups = [s for s in seen if s[0] == "backup"]
+    deletes = [s for s in seen if s[0] == "delete"]
+    assert backups and backups[-1][1] == backups[-1][2] > 0
+    assert deletes[-1] == ("delete", len(plan.delete), len(plan.delete))

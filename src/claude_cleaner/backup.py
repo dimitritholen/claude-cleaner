@@ -6,10 +6,12 @@ import io
 import json
 import os
 import shutil
+import stat
 import tarfile
 import tempfile
 from datetime import datetime
 from pathlib import Path
+from typing import Callable
 
 from . import __version__
 from .fsutil import is_within, remove
@@ -34,9 +36,44 @@ def _files(paths: ClaudePaths) -> dict[str, Path]:
     return files
 
 
-def create(paths: ClaudePaths, now: datetime | None = None) -> Path:
+def _sources(paths: ClaudePaths) -> list[tuple[str, Path]]:
+    """(name in the archive, path on disk) for everything a backup holds."""
+    sources = []
+    for name, root in _roots(paths).items():
+        if root.is_dir():
+            for child in sorted(root.iterdir()):
+                if name == "config_dir" and child.name in SKIP_DIRS:
+                    continue
+                if is_within(paths.backup_dir, child):
+                    continue
+                sources.append((f"{name}/{child.name}", child))
+    for name, path in _files(paths).items():
+        if path.exists():
+            sources.append((name, path))
+    return sources
+
+
+def _size(path: Path) -> int:
+    """Bytes of regular files under ``path`` (what tar counts), without following links."""
+    if path.is_symlink() or not path.is_dir():
+        return path.lstat().st_size if path.is_file() and not path.is_symlink() else 0
+    total = 0
+    for folder, _dirs, files in os.walk(path):
+        for name in files:
+            try:
+                st = os.lstat(os.path.join(folder, name))
+            except OSError:
+                continue
+            if stat.S_ISREG(st.st_mode):
+                total += st.st_size
+    return total
+
+
+def create(paths: ClaudePaths, now: datetime | None = None,
+           progress: Callable[[int, int], None] | None = None) -> Path:
     """Write a backup archive and return its path. The archive holds login tokens, so it
-    is readable by the current user only."""
+    is readable by the current user only. ``progress(done, total)`` is called in bytes
+    as files go into the archive."""
     paths.backup_dir.mkdir(parents=True, exist_ok=True)
     try:
         os.chmod(paths.backup_dir, 0o700)
@@ -56,24 +93,27 @@ def create(paths: ClaudePaths, now: datetime | None = None) -> Path:
         "roots": {k: str(v) for k, v in _roots(paths).items()},
         "files": {k: str(v) for k, v in _files(paths).items()},
     }
+    sources = _sources(paths)
+    total = sum(_size(path) for _, path in sources) if progress else 0
+    done = 0
+
+    def counted(info: tarfile.TarInfo) -> tarfile.TarInfo:
+        nonlocal done
+        done += info.size
+        progress(min(done, total), total)
+        return info
+
     fd = os.open(archive, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(fd, "wb") as raw, tarfile.open(fileobj=raw, mode="w:gz") as tar:
+    # Level 6 instead of tarfile's 9: several times faster for a few percent more size.
+    with os.fdopen(fd, "wb") as raw, \
+            tarfile.open(fileobj=raw, mode="w:gz", compresslevel=6) as tar:
         data = json.dumps(manifest, indent=2).encode()
         info = tarfile.TarInfo("manifest.json")
         info.size = len(data)
         info.mtime = int(datetime.now().timestamp())
         tar.addfile(info, io.BytesIO(data))
-        for name, root in _roots(paths).items():
-            if root.is_dir():
-                for child in sorted(root.iterdir()):
-                    if name == "config_dir" and child.name in SKIP_DIRS:
-                        continue
-                    if is_within(paths.backup_dir, child):
-                        continue
-                    tar.add(child, arcname=f"{name}/{child.name}", recursive=True)
-        for name, path in _files(paths).items():
-            if path.exists():
-                tar.add(path, arcname=name)
+        for name, path in sources:
+            tar.add(path, arcname=name, recursive=True, filter=counted if progress else None)
     return archive
 
 
@@ -91,13 +131,15 @@ def read_manifest(archive: Path) -> dict:
         return json.load(member)
 
 
-def restore(archive: Path, paths: ClaudePaths) -> Path:
+def restore(archive: Path, paths: ClaudePaths,
+            progress: Callable[[int, int], None] | None = None) -> Path:
     """Replace the current state with the archive's contents.
 
     The current state is backed up first; that safety backup's path is returned.
+    ``progress`` reports that safety backup, as in ``create``.
     """
     read_manifest(archive)  # fail early on a foreign archive
-    safety = create(paths)
+    safety = create(paths, progress=progress)
 
     roots = _roots(paths)
     for name, root in roots.items():

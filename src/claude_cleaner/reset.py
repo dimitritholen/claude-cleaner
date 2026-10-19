@@ -6,7 +6,7 @@ import copy
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from . import backup
 from .fsutil import is_within, norm, remove, write_json
@@ -209,11 +209,20 @@ def _clean_roots(paths) -> list[Path]:
     return roots
 
 
-def apply_reset(plan: ResetPlan, *, make_backup: bool = True) -> Path | None:
-    """Back up, delete, then write the rebuilt files. Returns the backup archive path."""
-    archive = backup.create(plan.inventory.paths) if make_backup else None
-    for path in plan.delete:
+def apply_reset(plan: ResetPlan, *, make_backup: bool = True,
+                progress: Callable[[str, int, int], None] | None = None) -> Path | None:
+    """Back up, delete, then write the rebuilt files. Returns the backup archive path.
+
+    ``progress(step, done, total)`` reports the "backup" step in bytes and the "delete"
+    step in items."""
+    report = progress or (lambda step, done, total: None)
+    archive = None
+    if make_backup:
+        archive = backup.create(plan.inventory.paths,
+                                progress=lambda done, total: report("backup", done, total))
+    for n, path in enumerate(plan.delete, 1):
         remove(path)
+        report("delete", n, len(plan.delete))
     for path, data in plan.write.items():
         write_json(path, data)
     return archive
