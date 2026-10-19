@@ -5,6 +5,8 @@ MCP servers, plugins and skills; tick the ones to keep and everything else goes:
 chat history, projects, settings, hooks, commands, agents, other skills and plugins.
 A backup is made first, and one command puts it back.
 
+![Pick the MCP servers, plugins and skills to keep](docs/screenshots/pick.png)
+
 ## Install
 
 Needs Python 3.10 or newer.
@@ -25,8 +27,15 @@ claude-cleaner
 
 1. Tick what to keep in the **MCP servers**, **Plugins** and **Skills** tabs
    (`space` toggles, `a` keeps all in the tab, `n` none, `r` reviews).
-2. The review screen lists every file and folder that will be deleted or rewritten.
-3. **Back up and reset** writes the backup, then resets.
+2. The review screen lists every file and folder that will be deleted or rewritten,
+   biggest first.
+
+   ![Review what will be deleted](docs/screenshots/review.png)
+
+3. **Back up and reset** writes the backup, then resets, and shows how far it is.
+
+   ![Backing up, then deleting](docs/screenshots/progress.png)
+   ![Done, with the backup and how to undo it](docs/screenshots/done.png)
 
 Without the UI:
 
