@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 
 from rich.segment import Segment
+from rich.style import Style
 from rich.text import Text
 from textual import on, work
 from textual.app import App, ComposeResult
@@ -51,8 +52,9 @@ def _table(rows: list[list[str]]) -> list[Text]:
 
 
 class KeepList(SelectionList[str]):
-    """A SelectionList that marks kept rows with a check and leaves the rest empty. The
-    stock box shows an X on every row, which reads as "delete" in this app."""
+    """A SelectionList drawn with a plain [✓] / [ ] box. The stock box is a coloured block
+    with an X on every row: the X reads as "delete" here, and on the highlighted row the
+    block melts into the highlight."""
 
     BINDINGS = [Binding("space", "select", "Keep / delete")]  # the stock one is hidden
 
@@ -62,9 +64,15 @@ class KeepList(SelectionList[str]):
             option = self.get_option_at_index(self.scroll_offset.y + y)
         except OptionDoesNotExist:
             return strip
+        # The stock line is: left half-block, inner glyph, right half-block, space, prompt.
         segments = list(strip)
-        box = segments[1]
-        segments[1] = Segment("✓" if option.value in self.selected else " ", box.style)
+        base = segments[3].style + Style(meta={"option": self.scroll_offset.y + y})
+        kept = option.value in self.selected
+        segments[:3] = [
+            Segment("[", base),
+            Segment("✓" if kept else " ", base + Style(color="green", bold=True)),
+            Segment("]", base),
+        ]
         return Strip(segments, strip.cell_length)
 
 
@@ -362,7 +370,10 @@ class CleanerApp(App):
     SUB_TITLE = "Reset Claude Code, keep your login"
     ENABLE_COMMAND_PALETTE = False
     CSS = """
-    SelectionList > .selection-list--button-selected { color: $success; text-style: bold; }
+    /* Textual's tall border is drawn with half blocks that show gaps between lines in
+       some terminals; box-drawing lines join up. */
+    KeepList { border: round $panel-lighten-2; }
+    KeepList:focus { border: round $primary; }
     /* Textual's default focus style reverses only the label text; mark the whole
        button and tab instead. */
     Button:focus { text-style: bold; border-top: tall $accent; border-bottom: tall $accent; }
