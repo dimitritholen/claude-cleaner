@@ -6,7 +6,6 @@ import io
 import json
 import os
 import shutil
-import stat
 import tarfile
 import tempfile
 from datetime import datetime
@@ -14,7 +13,7 @@ from pathlib import Path
 from typing import Callable
 
 from . import __version__
-from .fsutil import is_within, remove
+from .fsutil import is_within, remove, tree_size
 from .paths import ClaudePaths
 
 PREFIX = "claude-backup-"
@@ -53,22 +52,6 @@ def _sources(paths: ClaudePaths) -> list[tuple[str, Path]]:
     return sources
 
 
-def _size(path: Path) -> int:
-    """Bytes of regular files under ``path`` (what tar counts), without following links."""
-    if path.is_symlink() or not path.is_dir():
-        return path.lstat().st_size if path.is_file() and not path.is_symlink() else 0
-    total = 0
-    for folder, _dirs, files in os.walk(path):
-        for name in files:
-            try:
-                st = os.lstat(os.path.join(folder, name))
-            except OSError:
-                continue
-            if stat.S_ISREG(st.st_mode):
-                total += st.st_size
-    return total
-
-
 def create(paths: ClaudePaths, now: datetime | None = None,
            progress: Callable[[int, int], None] | None = None) -> Path:
     """Write a backup archive and return its path. The archive holds login tokens, so it
@@ -94,7 +77,7 @@ def create(paths: ClaudePaths, now: datetime | None = None,
         "files": {k: str(v) for k, v in _files(paths).items()},
     }
     sources = _sources(paths)
-    total = sum(_size(path) for _, path in sources) if progress else 0
+    total = sum(tree_size(path) for _, path in sources) if progress else 0
     done = 0
 
     def counted(info: tarfile.TarInfo) -> tarfile.TarInfo:

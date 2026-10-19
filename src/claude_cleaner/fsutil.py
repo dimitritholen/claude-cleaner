@@ -42,6 +42,25 @@ def remove(path: Path) -> None:
         shutil.rmtree(path, onerror=_clear_readonly)
 
 
+def tree_size(path: Path) -> int:
+    """Bytes of regular files under ``path`` (what tar counts), without following links."""
+    try:
+        if path.is_symlink() or not path.is_dir():
+            return path.stat().st_size if path.is_file() and not path.is_symlink() else 0
+    except OSError:
+        return 0
+    total = 0
+    for folder, _dirs, files in os.walk(path):
+        for name in files:
+            try:
+                st = os.lstat(os.path.join(folder, name))
+            except OSError:
+                continue
+            if stat.S_ISREG(st.st_mode):
+                total += st.st_size
+    return total
+
+
 def _is_junction(path: Path) -> bool:
     is_junction = getattr(os.path, "isjunction", None)
     return bool(is_junction and is_junction(path))
