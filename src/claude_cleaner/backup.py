@@ -6,6 +6,7 @@ import io
 import json
 import os
 import shutil
+import stat
 import tarfile
 import tempfile
 from datetime import datetime
@@ -52,6 +53,42 @@ def _sources(paths: ClaudePaths) -> list[tuple[str, Path]]:
     return sources
 
 
+def _grant_read(sources: list[tuple[str, Path]]) -> dict[str, tuple[Path, int]]:
+    """Make the user's own unreadable files and folders readable so tar can archive
+    them (a reset deletes them afterwards). Returns {arcname: (path, original mode)};
+    ``_revoke`` puts those modes back."""
+    granted: dict[str, tuple[Path, int]] = {}
+    if not hasattr(os, "getuid"):  # Windows: no POSIX read bits to lack
+        return granted
+
+    def fix(path: Path, arcname: str) -> None:
+        st = os.lstat(path)
+        if stat.S_ISLNK(st.st_mode) or st.st_uid != os.getuid():
+            return
+        need = stat.S_IRUSR | (stat.S_IXUSR if stat.S_ISDIR(st.st_mode) else 0)
+        if st.st_mode & need != need:
+            os.chmod(path, st.st_mode | need)
+            granted[arcname] = (path, stat.S_IMODE(st.st_mode))
+
+    for name, top in sources:
+        fix(top, name)
+        if top.is_dir() and not top.is_symlink():
+            for folder, dirs, files in os.walk(top):
+                for child in dirs + files:
+                    full = Path(folder, child)
+                    fix(full, f"{name}/{full.relative_to(top).as_posix()}")
+    return granted
+
+
+def _revoke(granted: dict[str, tuple[Path, int]]) -> None:
+    # Children were granted after their folder, so undo in reverse.
+    for path, mode in reversed(list(granted.values())):
+        try:
+            os.chmod(path, mode)
+        except OSError:
+            pass
+
+
 def create(paths: ClaudePaths, now: datetime | None = None,
            progress: Callable[[int, int], None] | None = None) -> Path:
     """Write a backup archive and return its path. The archive holds login tokens, so it
@@ -77,13 +114,26 @@ def create(paths: ClaudePaths, now: datetime | None = None,
         "files": {k: str(v) for k, v in _files(paths).items()},
     }
     sources = _sources(paths)
+    granted = _grant_read(sources)
+    try:
+        return _write(archive, manifest, sources, granted, progress)
+    finally:
+        _revoke(granted)
+
+
+def _write(archive: Path, manifest: dict, sources: list[tuple[str, Path]],
+           granted: dict[str, tuple[Path, int]],
+           progress: Callable[[int, int], None] | None) -> Path:
     total = sum(tree_size(path) for _, path in sources) if progress else 0
     done = 0
 
     def counted(info: tarfile.TarInfo) -> tarfile.TarInfo:
         nonlocal done
-        done += info.size
-        progress(min(done, total), total)
+        if info.name in granted:  # archive the mode the file really has
+            info.mode = granted[info.name][1]
+        if progress:
+            done += info.size
+            progress(min(done, total), total)
         return info
 
     fd = os.open(archive, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -96,7 +146,7 @@ def create(paths: ClaudePaths, now: datetime | None = None,
         info.mtime = int(datetime.now().timestamp())
         tar.addfile(info, io.BytesIO(data))
         for name, path in sources:
-            tar.add(path, arcname=name, recursive=True, filter=counted if progress else None)
+            tar.add(path, arcname=name, recursive=True, filter=counted)
     return archive
 
 

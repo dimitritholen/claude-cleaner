@@ -61,3 +61,21 @@ def test_reset_reports_progress_to_the_end(home):
     deletes = [s for s in seen if s[0] == "delete"]
     assert backups and backups[-1][1] == backups[-1][2] > 0
     assert deletes[-1] == ("delete", len(plan.delete), len(plan.delete))
+
+
+def test_backup_archives_unreadable_files_and_keeps_their_mode(home):
+    import os
+    import stat
+    import tarfile
+    if os.name == "nt":
+        return
+    locked = home.config_dir / "jobs" / "x" / "noperm.csv"
+    locked.parent.mkdir(parents=True)
+    locked.write_text("secret")
+    locked.chmod(0)
+    archive = backup.create(home)
+    assert stat.S_IMODE(locked.stat().st_mode) == 0
+    with tarfile.open(archive) as tar:
+        member = tar.getmember("config_dir/jobs/x/noperm.csv")
+        assert member.mode == 0
+        assert tar.extractfile(member).read() == b"secret"
