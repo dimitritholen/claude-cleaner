@@ -36,6 +36,7 @@ def remove(path: Path) -> None:
     if os.name == "nt" and _is_junction(path):
         os.rmdir(path)
         return
+    _grant_owner_rwx(path)
     if sys.version_info >= (3, 12):
         shutil.rmtree(path, onexc=_clear_readonly)
     else:
@@ -64,6 +65,23 @@ def tree_size(path: Path) -> int:
 def _is_junction(path: Path) -> bool:
     is_junction = getattr(os.path, "isjunction", None)
     return bool(is_junction and is_junction(path))
+
+
+def _grant_owner_rwx(top: Path) -> None:
+    # A folder without owner w/x (Go's module cache is 0555) can't be emptied, and
+    # rmtree's error handler only sees the child. Fix folders top-down before deleting.
+    def grant(path: str) -> None:
+        try:
+            mode = os.lstat(path).st_mode
+            if stat.S_ISDIR(mode) and mode & stat.S_IRWXU != stat.S_IRWXU:
+                os.chmod(path, mode | stat.S_IRWXU)
+        except OSError:
+            pass  # not ours to change; rmtree reports it
+
+    grant(os.fspath(top))
+    for folder, dirs, _files in os.walk(top):
+        for name in dirs:
+            grant(os.path.join(folder, name))
 
 
 def _clear_readonly(func: Any, path: str, _exc: Any) -> None:
